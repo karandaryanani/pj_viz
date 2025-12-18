@@ -1,5 +1,0 @@
-streamlit==1.31.0
-pandas==2.2.0
-plotly==5.18.0
-networkx==3.2.1
-streamlit-cytoscape==0.1.1
