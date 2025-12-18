@@ -1,12 +1,12 @@
 import streamlit as st
 import pandas as pd
-import plotly.graph_objects as go
 import networkx as nx
-from st_cytoscape import cytoscape
-import io
-import re
 import pickle
 import os
+from streamlit_agraph import agraph, Node, Edge, Config
+
+# Page config
+st.set_page_config(page_title="Network Explorer", layout="wide")
 
 # Load data
 @st.cache_data
@@ -15,321 +15,307 @@ def load_data(file_path):
     with open(file_path, 'rb') as f:
         return pickle.load(f)
 
-# Streamlit app
-st.title('Network Visualization')
+def get_neighborhood(G, node, distance=1):
+    """Get neighborhood of a node within distance"""
+    if node not in G:
+        return set(), set()
+    
+    nodes = {node}
+    edges = set()
+    current_layer = {node}
+    
+    for _ in range(distance):
+        next_layer = set()
+        for n in current_layer:
+            preds = set(G.predecessors(n))
+            succs = set(G.successors(n))
+            
+            for pred in preds:
+                edges.add((pred, n))
+                next_layer.add(pred)
+            for succ in succs:
+                edges.add((n, succ))
+                next_layer.add(succ)
+        
+        nodes.update(next_layer)
+        current_layer = next_layer
+    
+    return nodes, edges
 
-# Try to load local file, otherwise show uploader
+# Title
+st.title('🕸️ Network Explorer')
+
+# Load data
 LOCAL_FILE = "ionetwork.pkl"
+data = None
 
 if os.path.exists(LOCAL_FILE):
-    # Auto-load local file
     try:
         data = load_data(LOCAL_FILE)
-        st.info(f"Loaded local file: {LOCAL_FILE}")
+        st.success(f"✅ Loaded: {LOCAL_FILE}")
     except Exception as e:
-        st.error(f"Error loading local file: {str(e)}")
-        data = None
+        st.error(f"❌ Error: {str(e)}")
 else:
-    # File uploader for deployed version
-    uploaded_file = st.file_uploader("Upload your network pickle file", type=['pkl', 'pickle'])
-    
-    if uploaded_file is not None:
+    uploaded_file = st.file_uploader("Upload network pickle file", type=['pkl', 'pickle'])
+    if uploaded_file:
         try:
             data = pickle.load(uploaded_file)
+            st.success("✅ File loaded!")
         except Exception as e:
-            st.error(f"Error loading file: {str(e)}")
-            data = None
-    else:
-        data = None
+            st.error(f"❌ Error: {str(e)}")
 
 if data is not None:
-    # Check if data is a NetworkX graph or edge list
-    if isinstance(data, nx.Graph) or isinstance(data, nx.DiGraph):
-        DG_full = data
-        # Extract edge list for other operations
-        edge_df = pd.DataFrame(DG_full.edges(), columns=['source', 'target'])
+    # Convert to NetworkX DiGraph
+    if isinstance(data, (nx.Graph, nx.DiGraph)):
+        G = data if isinstance(data, nx.DiGraph) else nx.DiGraph(data)
     elif isinstance(data, pd.DataFrame):
-        edge_df = data
-        # Ensure column names are 'source' and 'target'
-        if len(edge_df.columns) >= 2:
-            edge_df.columns = ['source', 'target'] + list(edge_df.columns[2:])
-        DG_full = nx.from_pandas_edgelist(edge_df, 'source', 'target', create_using=nx.DiGraph())
+        G = nx.from_pandas_edgelist(
+            data, 
+            data.columns[0], 
+            data.columns[1], 
+            create_using=nx.DiGraph()
+        )
     else:
-        st.error("Unsupported data format. Please upload a NetworkX graph or DataFrame with edge list.")
+        st.error("Unsupported format")
         st.stop()
     
-    st.success(f"Network loaded successfully! Nodes: {DG_full.number_of_nodes()}, Edges: {DG_full.number_of_edges()}")
+    # Calculate metrics once
+    in_degrees = dict(G.in_degree())
+    out_degrees = dict(G.out_degree())
+    total_degrees = {n: in_degrees[n] + out_degrees[n] for n in G.nodes()}
+    max_degree = max(total_degrees.values()) if total_degrees else 1
     
-    # View selection
-    view = st.radio('Select view', ['Whole Network', 'Sankey Diagram'])
-    
-    if view == 'Whole Network':
-        st.header("Network Visualization")
+    # Sidebar controls
+    with st.sidebar:
+        st.header("🎛️ Controls")
         
-        # Add a search bar and search type selection
-        col1, col2 = st.columns([3, 1])
-        with col1:
-            search_query = st.text_input("Search for a node", "")
-        with col2:
-            search_type = st.radio("Search type", ["Filter", "Highlight"])
+        # Search
+        search_term = st.text_input("🔍 Search nodes", "")
         
-        # Filter or highlight based on search
-        if search_query:
-            escaped_query = re.escape(search_query)
-            case_insensitive_pattern = f"(?i){escaped_query}"
-            if search_type == "Filter":
-                # Filter the graph based on the search query
-                matching_nodes = [node for node in DG_full.nodes() if re.search(case_insensitive_pattern, str(node))]
-                DG = nx.subgraph(DG_full, matching_nodes).copy()
-                # Include neighboring nodes to show connections
-                neighbors = set()
-                for node in list(DG.nodes()):
-                    neighbors.update(DG_full.predecessors(node))
-                    neighbors.update(DG_full.successors(node))
-                DG = DG_full.subgraph(set(DG.nodes()).union(neighbors)).copy()
-            else:
-                DG = DG_full
-        else:
-            DG = DG_full
+        # Filter by degree
+        min_degree = st.slider(
+            "Min connections", 
+            0, 
+            max_degree, 
+            0,
+            help="Filter nodes by minimum total connections"
+        )
         
-        # Calculate in-degrees for the current graph
-        in_degrees = dict(DG.in_degree())
-        max_in_degree = max(in_degrees.values()) if in_degrees else 1
+        # Max nodes to show
+        max_nodes = st.slider(
+            "Max nodes to display",
+            10,
+            min(1000, G.number_of_nodes()),
+            min(200, G.number_of_nodes()),
+            step=10,
+            help="Limit number of nodes for performance"
+        )
         
-        # Calculate degree threshold for top 5%
-        if len(in_degrees) > 0:
-            degree_threshold = sorted(in_degrees.values(), reverse=True)[max(0, int(len(in_degrees) * 0.05))]
-        else:
-            degree_threshold = 0
+        # Node selection for neighborhood
+        st.divider()
+        st.subheader("🎯 Explore Node")
         
-        # Prepare data for Cytoscape
-        nodes = []
-        for node in DG.nodes():
-            highlight = False
-            if search_query and search_type == "Highlight":
-                if re.search(case_insensitive_pattern, str(node)):
-                    highlight = True
-            nodes.append({
-                'data': {
-                    'id': str(node),
-                    'label': str(node),
-                    'size': 20 + (in_degrees[node] / max_in_degree) * 50 if max_in_degree > 0 else 20,
-                    'degree': in_degrees[node],
-                    'show_label': in_degrees[node] >= degree_threshold,
-                    'highlight': highlight
-                }
-            })
-        
-        edges = []
-        for source, target in DG.edges():
-            highlight = False
-            if search_query and search_type == "Highlight":
-                if any(re.search(case_insensitive_pattern, str(n)) for n in [source, target]):
-                    highlight = True
-            edges.append({
-                'data': {
-                    'source': str(source),
-                    'target': str(target),
-                    'id': f"{source}->{target}",
-                    'highlight': highlight
-                }
-            })
-        
-        elements = nodes + edges
-        
-        # Create Cytoscape stylesheet
-        stylesheet = [
-            {
-                'selector': 'node',
-                'style': {
-                    'background-color': '#11479e',
-                    'width': 'data(size)',
-                    'height': 'data(size)',
-                }
-            },
-            {
-                'selector': 'node[?highlight]',
-                'style': {
-                    'background-color': '#ff0000',
-                }
-            },
-            {
-                'selector': 'node[?show_label]',
-                'style': {
-                    'content': 'data(label)',
-                    'font-size': '12px',
-                    'text-valign': 'bottom',
-                    'text-halign': 'center',
-                    'color': 'white',
-                    'text-background-color': 'white',
-                    'text-background-opacity': 0.7,
-                    'text-background-padding': '3px',
-                    'text-border-opacity': 0,
-                }
-            },
-            {
-                'selector': 'node:selected',
-                'style': {
-                    'content': 'data(label)',
-                    'font-size': '14px',
-                    'text-valign': 'top',
-                    'text-halign': 'center',
-                    'color': 'black',
-                    'text-background-color': 'white',
-                    'text-background-opacity': 1,
-                    'text-background-padding': '3px',
-                    'text-border-opacity': 1,
-                    'text-border-width': 1,
-                    'text-border-color': 'black',
-                }
-            },
-            {
-                'selector': 'edge',
-                'style': {
-                    'width': 1,
-                    'line-color': '#9dbaea',
-                    'target-arrow-color': '#9dbaea',
-                    'target-arrow-shape': 'triangle',
-                    'curve-style': 'bezier',
-                }
-            },
-            {
-                'selector': 'edge[?highlight]',
-                'style': {
-                    'line-color': '#ff0000',
-                    'target-arrow-color': '#ff0000',
-                }
-            }
+        # Get filtered nodes for selection
+        filtered_nodes = [
+            n for n in G.nodes() 
+            if total_degrees[n] >= min_degree
+            and (not search_term or search_term.lower() in str(n).lower())
         ]
         
-        # Layout configuration
-        layout = {
-            "name": "cose",
-            "idealEdgeLength": 100,
-            "nodeOverlap": 20,
-            "refresh": 20,
-            "fit": True,
-            "padding": 30,
-            "randomize": True,
-            "componentSpacing": 100,
-            "nodeRepulsion": 400000,
-            "edgeElasticity": 100,
-            "nestingFactor": 5,
-            "gravity": 80,
-            "numIter": 1000,
-            "initialTemp": 200,
-            "coolingFactor": 0.95,
-            "minTemp": 1.0
-        }
+        # Sort by degree and limit
+        filtered_nodes = sorted(filtered_nodes, key=lambda n: total_degrees[n], reverse=True)[:max_nodes]
         
-        # Render the Cytoscape component
-        selected = cytoscape(
-            elements,
-            stylesheet,
-            layout=layout,
-            key="cytoscape",
-            height="600px",
-            width="100%",
-            selection_type="single"
-        )
-        
-        # Display selected nodes and edges
-        if selected:
-            st.write("**Selected nodes:**", ", ".join(selected.get('nodes', [])))
-            st.write("**Selected edges:**", ", ".join(selected.get('edges', [])))
-        
-        # Network statistics
-        st.subheader("Network Statistics")
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("Nodes", DG.number_of_nodes())
-        with col2:
-            st.metric("Edges", DG.number_of_edges())
-        with col3:
-            st.metric("Density", f"{nx.density(DG):.4f}")
-            
-    elif view == 'Sankey Diagram':
-        st.header("Sankey Diagram")
-        
-        # Get all unique nodes
-        all_nodes = list(set(edge_df['source'].tolist() + edge_df['target'].tolist()))
-        
-        st.info(f"📊 Total nodes in network: {len(all_nodes)}")
-        st.write("Please select a node to visualize its connections in the Sankey diagram.")
-        
-        # Searchable selectbox for node selection (REQUIRED)
         selected_node = st.selectbox(
-            "Search and select a node:",
-            options=[""] + sorted(all_nodes),  # Empty option at start
-            index=0,
-            help="Type to search for a node"
+            "Select node to explore",
+            [""] + filtered_nodes,
+            help="Choose a node to see its neighborhood"
         )
         
-        # Only show Sankey if a node is selected
         if selected_node:
-            # Prepare data for Sankey diagram
-            sankey_data = edge_df.copy()
-            sankey_data.columns = ['source', 'target'] if len(sankey_data.columns) == 2 else list(sankey_data.columns)
-            sankey_data['weight'] = 1
+            neighborhood_size = st.slider(
+                "Neighborhood distance",
+                1, 3, 1,
+                help="How many hops from selected node"
+            )
             
-            # Filter to show only edges connected to selected node
-            sankey_data = sankey_data[
-                (sankey_data['source'] == selected_node) | 
-                (sankey_data['target'] == selected_node)
-            ]
-            
-            if len(sankey_data) == 0:
-                st.warning(f"No connections found for node: {selected_node}")
-            else:
-                st.success(f"Showing {len(sankey_data)} connections for: **{selected_node}**")
-                
-                # Create Sankey diagram
-                all_nodes_filtered = list(set(sankey_data['source'].tolist() + sankey_data['target'].tolist()))
-                node_indices = {node: index for index, node in enumerate(all_nodes_filtered)}
-                
-                fig = go.Figure(data=[go.Sankey(
-                    node = dict(
-                        pad = 15,
-                        thickness = 20,
-                        line = dict(color = "black", width = 0.5),
-                        label = all_nodes_filtered,
-                        color = "blue"
-                    ),
-                    link = dict(
-                        source = [node_indices[source] for source in sankey_data['source']],
-                        target = [node_indices[target] for target in sankey_data['target']],
-                        value = sankey_data['weight']
-                    )
-                )])
-                
-                fig.update_layout(
-                    title_text=f"Sankey Diagram for: {selected_node}", 
-                    font_size=10, 
-                    height=600
-                )
-                
-                st.plotly_chart(fig, use_container_width=True)
-                
-                # Save Sankey as HTML
-                buffer = io.StringIO()
-                fig.write_html(buffer)
-                html_bytes = buffer.getvalue().encode()
-                
-                # Download button for Sankey HTML
-                st.download_button(
-                    label="Download Sankey HTML",
-                    data=html_bytes,
-                    file_name=f"sankey_{selected_node.replace(' ', '_')}.html",
-                    mime="text/html"
-                )
+            show_neighborhood_only = st.checkbox(
+                "Show only neighborhood",
+                value=True,
+                help="Hide other nodes"
+            )
+        
+        st.divider()
+        st.subheader("🎨 Visual Settings")
+        
+        node_size_factor = st.slider("Node size", 5, 30, 15)
+        show_labels = st.checkbox("Show all labels", value=False)
+        physics_enabled = st.checkbox("Physics simulation", value=True)
+    
+    # Determine which nodes/edges to show
+    if selected_node and show_neighborhood_only:
+        nodes_to_show, edges_to_show = get_neighborhood(G, selected_node, neighborhood_size)
+        title = f"Neighborhood of **{selected_node}** ({neighborhood_size} hop{'s' if neighborhood_size > 1 else ''})"
+    else:
+        nodes_to_show = set(filtered_nodes)
+        edges_to_show = {
+            (u, v) for u, v in G.edges() 
+            if u in nodes_to_show and v in nodes_to_show
+        }
+        title = f"Network View"
+    
+    st.subheader(f"{title} — {len(nodes_to_show)} nodes, {len(edges_to_show)} edges")
+    
+    # Build agraph elements
+    nodes = []
+    edges = []
+    
+    # Add nodes
+    for node in nodes_to_show:
+        is_selected = (node == selected_node)
+        is_searched = (search_term and search_term.lower() in str(node).lower())
+        
+        # Node size based on degree
+        degree = total_degrees[node]
+        size = node_size_factor + (degree / max_degree) * node_size_factor
+        
+        # Node color
+        if is_selected:
+            color = '#FF4136'  # Red
+        elif is_searched:
+            color = '#FF851B'  # Orange
         else:
-            st.warning("⬆️ Please select a node from the dropdown above to view the Sankey diagram.")
+            # Blue gradient by degree
+            intensity = min(degree / max_degree, 1)
+            blue_val = int(100 + 155 * intensity)
+            color = f'#{50:02x}{100:02x}{blue_val:02x}'
+        
+        # Show label if selected, searched, or high degree
+        label = str(node) if (show_labels or is_selected or is_searched or degree > max_degree * 0.3) else ""
+        
+        nodes.append(
+            Node(
+                id=str(node),
+                label=label,
+                size=size,
+                color=color,
+                title=f"{node}\nIn: {in_degrees[node]} | Out: {out_degrees[node]}",  # Tooltip
+            )
+        )
+    
+    # Add edges
+    for source, target in edges_to_show:
+        is_highlighted = (selected_node and (source == selected_node or target == selected_node))
+        
+        edges.append(
+            Edge(
+                source=str(source),
+                target=str(target),
+                color='#FF4136' if is_highlighted else '#95a5a6',
+                width=3 if is_highlighted else 1,
+            )
+        )
+    
+    # Graph configuration
+    config = Config(
+        width="100%",
+        height=700,
+        directed=True,
+        physics=physics_enabled,
+        hierarchical=False,
+        nodeHighlightBehavior=True,
+        highlightColor="#F7CA18",
+        collapsible=False,
+        node={
+            'labelProperty': 'label',
+            'renderLabel': True,
+            'fontSize': 12,
+            'fontColor': 'white',
+        },
+        link={
+            'labelProperty': 'label',
+            'renderLabel': False,
+            'highlightColor': '#F7CA18',
+        },
+    )
+    
+    # Render graph
+    return_value = agraph(nodes=nodes, edges=edges, config=config)
+    
+    # Show clicked node info
+    if return_value:
+        st.divider()
+        clicked_node = return_value
+        
+        if clicked_node in G.nodes():
+            st.subheader(f"📊 Node: {clicked_node}")
+            
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                st.metric("In-Degree", in_degrees.get(clicked_node, 0))
+            with col2:
+                st.metric("Out-Degree", out_degrees.get(clicked_node, 0))
+            with col3:
+                predecessors = list(G.predecessors(clicked_node))
+                st.metric("Incoming", len(predecessors))
+            with col4:
+                successors = list(G.successors(clicked_node))
+                st.metric("Outgoing", len(successors))
+            
+            # Show connections
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                with st.expander(f"⬅️ Incoming ({len(predecessors)})", expanded=len(predecessors) <= 10):
+                    if predecessors:
+                        for pred in sorted(predecessors)[:50]:
+                            st.text(f"• {pred}")
+                        if len(predecessors) > 50:
+                            st.text(f"... and {len(predecessors) - 50} more")
+                    else:
+                        st.text("No incoming connections")
+            
+            with col2:
+                with st.expander(f"➡️ Outgoing ({len(successors)})", expanded=len(successors) <= 10):
+                    if successors:
+                        for succ in sorted(successors)[:50]:
+                            st.text(f"• {succ}")
+                        if len(successors) > 50:
+                            st.text(f"... and {len(successors) - 50} more")
+                    else:
+                        st.text("No outgoing connections")
+    
+    # Network stats at bottom
+    with st.expander("📈 Network Statistics"):
+        col1, col2, col3, col4, col5 = st.columns(5)
+        with col1:
+            st.metric("Total Nodes", G.number_of_nodes())
+        with col2:
+            st.metric("Total Edges", G.number_of_edges())
+        with col3:
+            st.metric("Density", f"{nx.density(G):.4f}")
+        with col4:
+            st.metric("Avg Degree", f"{sum(total_degrees.values())/len(total_degrees):.1f}")
+        with col5:
+            st.metric("Max Degree", max_degree)
+        
+        # Top nodes by degree
+        st.subheader("🏆 Top 10 Nodes by Degree")
+        top_nodes = sorted(total_degrees.items(), key=lambda x: x[1], reverse=True)[:10]
+        df = pd.DataFrame(top_nodes, columns=['Node', 'Degree'])
+        df['In'] = df['Node'].map(in_degrees)
+        df['Out'] = df['Node'].map(out_degrees)
+        st.dataframe(df, use_container_width=True)
 
 else:
-    st.info("Please upload a pickle file to visualize the network.")
+    st.info("👈 Upload a pickle file to get started")
     st.markdown("""
     ### Expected Format:
-    Your pickle file should contain one of the following:
-    - A NetworkX Graph or DiGraph object
-    - A pandas DataFrame with at least two columns (source, target) representing edges
+    - NetworkX Graph/DiGraph object, or
+    - pandas DataFrame with edge list (source, target columns)
+    
+    ### Install:
+    ```bash
+    pip install streamlit-agraph
+    ```
     """)
