@@ -18,8 +18,8 @@ RUN uv pip install --system --no-cache .
 # Copy application files
 COPY app.py ./
 
-# Create .streamlit directory and config
-RUN mkdir -p /app/.streamlit && \
+# Create .streamlit directory and config + data directory
+RUN mkdir -p /app/.streamlit /app/data && \
     echo "[server]\nheadless = true\nenableCORS = false\nenableXsrfProtection = false\n[browser]\ngatherUsageStats = false" > /app/.streamlit/config.toml
 
 # Set proper permissions for OpenShift (runs as random UID with GID 0)

@@ -3,10 +3,27 @@ import pandas as pd
 import networkx as nx
 import pickle
 import os
+from pathlib import Path
 from streamlit_agraph import agraph, Node, Edge, Config
 
 # Page config
 st.set_page_config(page_title="Network Explorer", layout="wide")
+
+# Persistent storage setup
+DATA_DIR = Path("/app/data")
+PERSISTENT_FILE = DATA_DIR / "ionetwork.pkl"
+LOCAL_FILE = Path("ionetwork.pkl")
+
+# Determine which file to use (persistent storage takes priority)
+if PERSISTENT_FILE.exists():
+    ACTIVE_FILE = PERSISTENT_FILE
+    storage_type = "persistent storage"
+elif LOCAL_FILE.exists():
+    ACTIVE_FILE = LOCAL_FILE
+    storage_type = "local file"
+else:
+    ACTIVE_FILE = None
+    storage_type = None
 
 # Load data
 @st.cache_data
@@ -14,6 +31,26 @@ def load_data(file_path):
     """Load network data from pickle file"""
     with open(file_path, 'rb') as f:
         return pickle.load(f)
+
+def save_to_persistent_storage(data):
+    """Save data to persistent storage if available"""
+    try:
+        # Create directory if it doesn't exist
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        
+        # Save the file
+        with open(PERSISTENT_FILE, 'wb') as f:
+            pickle.dump(data, f)
+        
+        return True, PERSISTENT_FILE
+    except Exception as e:
+        # If persistent storage not available, save locally
+        try:
+            with open(LOCAL_FILE, 'wb') as f:
+                pickle.dump(data, f)
+            return True, LOCAL_FILE
+        except Exception as e2:
+            return False, str(e2)
 
 def extract_neighborhood(G, product, hops_in=2, hops_out=2, max_products=20):
     """
@@ -72,23 +109,35 @@ def extract_neighborhood(G, product, hops_in=2, hops_out=2, max_products=20):
 st.title('🕸️ Network Explorer')
 
 # Load data
-LOCAL_FILE = "ionetwork.pkl"
 data = None
 
-if os.path.exists(LOCAL_FILE):
+if ACTIVE_FILE:
     try:
-        data = load_data(LOCAL_FILE)
-        st.success(f"✅ Loaded: {LOCAL_FILE}")
+        data = load_data(ACTIVE_FILE)
+        file_size = ACTIVE_FILE.stat().st_size / 1024  # KB
+        st.success(f"✅ Loaded from {storage_type}: {ACTIVE_FILE.name} ({file_size:.1f} KB)")
     except Exception as e:
-        st.error(f"❌ Error: {str(e)}")
+        st.error(f"❌ Error loading {ACTIVE_FILE}: {str(e)}")
 else:
-    uploaded_file = st.file_uploader("Upload network pickle file", type=['pkl', 'pickle'])
-    if uploaded_file:
-        try:
-            data = pickle.load(uploaded_file)
-            st.success("✅ File loaded!")
-        except Exception as e:
-            st.error(f"❌ Error: {str(e)}")
+    st.info("📁 No existing network file found. Upload one below.")
+
+# File uploader
+uploaded_file = st.file_uploader("Upload network pickle file", type=['pkl', 'pickle'])
+if uploaded_file:
+    try:
+        data = pickle.load(uploaded_file)
+        st.success("✅ File loaded from upload!")
+        
+        # Try to save to persistent storage
+        success, save_path = save_to_persistent_storage(data)
+        if success:
+            st.success(f"💾 Saved to {save_path}")
+            st.info("🔄 Refresh the page to load from saved file automatically")
+        else:
+            st.warning(f"⚠️ Could not save to persistent storage: {save_path}")
+            
+    except Exception as e:
+        st.error(f"❌ Error loading file: {str(e)}")
 
 if data is not None:
     # Convert to NetworkX DiGraph
@@ -220,7 +269,7 @@ if data is not None:
                         st.text(f"... +{len(predecessors) - 20} more")
             
             with col2:
-                st.write(f"**➡️ Outgoing ({len(successors)})**")
+                st.write(f"➡️ Outgoing ({len(successors)})**")
                 if successors:
                     for s in sorted(successors)[:20]:
                         st.text(f"• {s}")
