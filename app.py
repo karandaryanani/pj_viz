@@ -106,7 +106,7 @@ def extract_neighborhood(G, product, hops_in=2, hops_out=2, max_products=20):
     return visited, edges
 
 # Title
-st.title('🕸️ Network Explorer')
+st.title('Network Explorer')
 
 # Load data
 data = None
