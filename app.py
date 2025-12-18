@@ -15,32 +15,58 @@ def load_data(file_path):
     with open(file_path, 'rb') as f:
         return pickle.load(f)
 
-def get_neighborhood(G, node, distance=1):
-    """Get neighborhood of a node within distance"""
-    if node not in G:
+def extract_neighborhood(G, product, hops_in=2, hops_out=2, max_products=20):
+    """
+    Extract balanced neighborhood around a product
+    
+    Args:
+        G: Full NetworkX graph
+        product: Product of interest (center of neighborhood)
+        hops_in: How many levels upstream (suppliers)
+        hops_out: How many levels downstream (customers)
+        max_products: Maximum total nodes to include
+    
+    Returns:
+        Set of nodes, set of edges
+    """
+    if product not in G:
         return set(), set()
     
-    nodes = {node}
+    visited = set([product])
+    
+    # Get upstream (suppliers/inputs)
+    for hop in range(hops_in):
+        if len(visited) >= max_products:
+            break
+        current_level = list(visited)
+        for node in current_level:
+            if len(visited) >= max_products:
+                break
+            predecessors = set(G.predecessors(node)) - visited
+            visited.update(list(predecessors)[:max_products - len(visited)])
+    
+    # Get downstream (customers/outputs)
+    for hop in range(hops_out):
+        if len(visited) >= max_products:
+            break
+        current_level = list(visited)
+        for node in current_level:
+            if len(visited) >= max_products:
+                break
+            successors = set(G.successors(node)) - visited
+            visited.update(list(successors)[:max_products - len(visited)])
+    
+    # Get all edges between visited nodes
     edges = set()
-    current_layer = {node}
+    for node in visited:
+        for pred in G.predecessors(node):
+            if pred in visited:
+                edges.add((pred, node))
+        for succ in G.successors(node):
+            if succ in visited:
+                edges.add((node, succ))
     
-    for _ in range(distance):
-        next_layer = set()
-        for n in current_layer:
-            preds = set(G.predecessors(n))
-            succs = set(G.successors(n))
-            
-            for pred in preds:
-                edges.add((pred, n))
-                next_layer.add(pred)
-            for succ in succs:
-                edges.add((n, succ))
-                next_layer.add(succ)
-        
-        nodes.update(next_layer)
-        current_layer = next_layer
-    
-    return nodes, edges
+    return visited, edges
 
 # Title
 st.title('🕸️ Network Explorer')
@@ -79,243 +105,129 @@ if data is not None:
         st.error("Unsupported format")
         st.stop()
     
-    # Calculate metrics once
-    in_degrees = dict(G.in_degree())
-    out_degrees = dict(G.out_degree())
-    total_degrees = {n: in_degrees[n] + out_degrees[n] for n in G.nodes()}
-    max_degree = max(total_degrees.values()) if total_degrees else 1
+    # Simple degree dict
+    degrees = {n: G.in_degree(n) + G.out_degree(n) for n in G.nodes()}
+    max_degree = max(degrees.values()) if degrees else 1
+    
+    # Get all nodes sorted by degree
+    all_nodes = sorted(G.nodes(), key=lambda n: degrees[n], reverse=True)
     
     # Sidebar controls
     with st.sidebar:
         st.header("🎛️ Controls")
         
-        # Search
-        search_term = st.text_input("🔍 Search nodes", "")
-        
-        # Filter by degree
-        min_degree = st.slider(
-            "Min connections", 
-            0, 
-            max_degree, 
-            0,
-            help="Filter nodes by minimum total connections"
-        )
-        
-        # Max nodes to show
-        max_nodes = st.slider(
-            "Max nodes to display",
-            10,
-            min(1000, G.number_of_nodes()),
-            min(200, G.number_of_nodes()),
-            step=10,
-            help="Limit number of nodes for performance"
-        )
-        
-        # Node selection for neighborhood
-        st.divider()
-        st.subheader("🎯 Explore Node")
-        
-        # Get filtered nodes for selection
-        filtered_nodes = [
-            n for n in G.nodes() 
-            if total_degrees[n] >= min_degree
-            and (not search_term or search_term.lower() in str(n).lower())
-        ]
-        
-        # Sort by degree and limit
-        filtered_nodes = sorted(filtered_nodes, key=lambda n: total_degrees[n], reverse=True)[:max_nodes]
-        
+        # Node selection dropdown
         selected_node = st.selectbox(
-            "Select node to explore",
-            [""] + filtered_nodes,
-            help="Choose a node to see its neighborhood"
+            "Select node to explore", 
+            [""] + all_nodes,
+            format_func=lambda x: f"{x} ({degrees[x]} connections)" if x else "-- Choose a node --"
         )
         
         if selected_node:
-            neighborhood_size = st.slider(
-                "Neighborhood distance",
-                1, 3, 1,
-                help="How many hops from selected node"
-            )
+            st.divider()
+            st.subheader("🎯 Neighborhood")
             
-            show_neighborhood_only = st.checkbox(
-                "Show only neighborhood",
-                value=True,
-                help="Hide other nodes"
-            )
-        
-        st.divider()
-        st.subheader("🎨 Visual Settings")
-        
-        node_size_factor = st.slider("Node size", 5, 30, 15)
-        show_labels = st.checkbox("Show all labels", value=False)
-        physics_enabled = st.checkbox("Physics simulation", value=True)
+            col1, col2 = st.columns(2)
+            with col1:
+                hops_in = st.slider("⬅️ Hops upstream", 0, 5, 2)
+            with col2:
+                hops_out = st.slider("➡️ Hops downstream", 0, 5, 2)
+            
+            max_products = st.slider("Max nodes", 10, 200, 20, step=10)
+            
+            st.divider()
+            
+            node_size = st.slider("Node size", 5, 30, 15)
+            show_labels = st.checkbox("Show labels", value=False)
+            physics = st.checkbox("Physics", value=True)
+            
+            # Show direct connection stats
+            if selected_node in G:
+                direct_suppliers = len(list(G.predecessors(selected_node)))
+                direct_customers = len(list(G.successors(selected_node)))
+                st.info(f"**Direct connections:**\n- Suppliers: {direct_suppliers}\n- Customers: {direct_customers}")
     
-    # Determine which nodes/edges to show
-    if selected_node and show_neighborhood_only:
-        nodes_to_show, edges_to_show = get_neighborhood(G, selected_node, neighborhood_size)
-        title = f"Neighborhood of **{selected_node}** ({neighborhood_size} hop{'s' if neighborhood_size > 1 else ''})"
-    else:
-        nodes_to_show = set(filtered_nodes)
-        edges_to_show = {
-            (u, v) for u, v in G.edges() 
-            if u in nodes_to_show and v in nodes_to_show
-        }
-        title = f"Network View"
-    
-    st.subheader(f"{title} — {len(nodes_to_show)} nodes, {len(edges_to_show)} edges")
-    
-    # Build agraph elements
-    nodes = []
-    edges = []
-    
-    # Add nodes
-    for node in nodes_to_show:
-        is_selected = (node == selected_node)
-        is_searched = (search_term and search_term.lower() in str(node).lower())
+    # Only show graph if a node is selected
+    if selected_node:
+        nodes_to_show, edges_to_show = extract_neighborhood(
+            G, selected_node, hops_in, hops_out, max_products
+        )
         
-        # Node size based on degree
-        degree = total_degrees[node]
-        size = node_size_factor + (degree / max_degree) * node_size_factor
+        st.subheader(f"{len(nodes_to_show)} nodes, {len(edges_to_show)} edges")
         
-        # Node color
-        if is_selected:
-            color = '#FF4136'  # Red
-        elif is_searched:
-            color = '#FF851B'  # Orange
-        else:
-            # Blue gradient by degree
-            intensity = min(degree / max_degree, 1)
-            blue_val = int(100 + 155 * intensity)
-            color = f'#{50:02x}{100:02x}{blue_val:02x}'
+        # Build graph
+        nodes = []
+        edges = []
         
-        # Show label if selected, searched, or high degree
-        label = str(node) if (show_labels or is_selected or is_searched or degree > max_degree * 0.3) else ""
-        
-        nodes.append(
-            Node(
+        for node in nodes_to_show:
+            is_selected = (node == selected_node)
+            
+            size = node_size + (degrees[node] / max_degree) * node_size
+            
+            if is_selected:
+                color = '#FF4136'  # Red for selected
+            else:
+                color = '#0074D9'  # Blue for others
+            
+            label = str(node) if (show_labels or is_selected) else ""
+            
+            nodes.append(Node(
                 id=str(node),
                 label=label,
                 size=size,
                 color=color,
-                title=f"{node}\nIn: {in_degrees[node]} | Out: {out_degrees[node]}",  # Tooltip
-            )
-        )
-    
-    # Add edges
-    for source, target in edges_to_show:
-        is_highlighted = (selected_node and (source == selected_node or target == selected_node))
+                title=f"{node} (connections: {degrees[node]})"
+            ))
         
-        edges.append(
-            Edge(
+        for source, target in edges_to_show:
+            is_highlighted = (source == selected_node or target == selected_node)
+            edges.append(Edge(
                 source=str(source),
                 target=str(target),
                 color='#FF4136' if is_highlighted else '#95a5a6',
-                width=3 if is_highlighted else 1,
-            )
-        )
-    
-    # Graph configuration
-    config = Config(
-        width="100%",
-        height=700,
-        directed=True,
-        physics=physics_enabled,
-        hierarchical=False,
-        nodeHighlightBehavior=True,
-        highlightColor="#F7CA18",
-        collapsible=False,
-        node={
-            'labelProperty': 'label',
-            'renderLabel': True,
-            'fontSize': 12,
-            'fontColor': 'white',
-        },
-        link={
-            'labelProperty': 'label',
-            'renderLabel': False,
-            'highlightColor': '#F7CA18',
-        },
-    )
-    
-    # Render graph
-    return_value = agraph(nodes=nodes, edges=edges, config=config)
-    
-    # Show clicked node info
-    if return_value:
-        st.divider()
-        clicked_node = return_value
+                width=3 if is_highlighted else 1
+            ))
         
-        if clicked_node in G.nodes():
-            st.subheader(f"📊 Node: {clicked_node}")
+        config = Config(
+            width="100%",
+            height=700,
+            directed=True,
+            physics=physics,
+            hierarchical=False,
+            nodeHighlightBehavior=True,
+            highlightColor="#F7CA18"
+        )
+        
+        # Render
+        return_value = agraph(nodes=nodes, edges=edges, config=config)
+        
+        # Show clicked node info
+        if return_value and return_value in G.nodes():
+            st.divider()
+            st.subheader(f"📊 {return_value}")
             
-            col1, col2, col3, col4 = st.columns(4)
+            predecessors = list(G.predecessors(return_value))
+            successors = list(G.successors(return_value))
             
-            with col1:
-                st.metric("In-Degree", in_degrees.get(clicked_node, 0))
-            with col2:
-                st.metric("Out-Degree", out_degrees.get(clicked_node, 0))
-            with col3:
-                predecessors = list(G.predecessors(clicked_node))
-                st.metric("Incoming", len(predecessors))
-            with col4:
-                successors = list(G.successors(clicked_node))
-                st.metric("Outgoing", len(successors))
-            
-            # Show connections
             col1, col2 = st.columns(2)
             
             with col1:
-                with st.expander(f"⬅️ Incoming ({len(predecessors)})", expanded=len(predecessors) <= 10):
-                    if predecessors:
-                        for pred in sorted(predecessors)[:50]:
-                            st.text(f"• {pred}")
-                        if len(predecessors) > 50:
-                            st.text(f"... and {len(predecessors) - 50} more")
-                    else:
-                        st.text("No incoming connections")
+                st.write(f"**⬅️ Incoming ({len(predecessors)})**")
+                if predecessors:
+                    for p in sorted(predecessors)[:20]:
+                        st.text(f"• {p}")
+                    if len(predecessors) > 20:
+                        st.text(f"... +{len(predecessors) - 20} more")
             
             with col2:
-                with st.expander(f"➡️ Outgoing ({len(successors)})", expanded=len(successors) <= 10):
-                    if successors:
-                        for succ in sorted(successors)[:50]:
-                            st.text(f"• {succ}")
-                        if len(successors) > 50:
-                            st.text(f"... and {len(successors) - 50} more")
-                    else:
-                        st.text("No outgoing connections")
-    
-    # Network stats at bottom
-    with st.expander("📈 Network Statistics"):
-        col1, col2, col3, col4, col5 = st.columns(5)
-        with col1:
-            st.metric("Total Nodes", G.number_of_nodes())
-        with col2:
-            st.metric("Total Edges", G.number_of_edges())
-        with col3:
-            st.metric("Density", f"{nx.density(G):.4f}")
-        with col4:
-            st.metric("Avg Degree", f"{sum(total_degrees.values())/len(total_degrees):.1f}")
-        with col5:
-            st.metric("Max Degree", max_degree)
-        
-        # Top nodes by degree
-        st.subheader("🏆 Top 10 Nodes by Degree")
-        top_nodes = sorted(total_degrees.items(), key=lambda x: x[1], reverse=True)[:10]
-        df = pd.DataFrame(top_nodes, columns=['Node', 'Degree'])
-        df['In'] = df['Node'].map(in_degrees)
-        df['Out'] = df['Node'].map(out_degrees)
-        st.dataframe(df, use_container_width=True)
+                st.write(f"**➡️ Outgoing ({len(successors)})**")
+                if successors:
+                    for s in sorted(successors)[:20]:
+                        st.text(f"• {s}")
+                    if len(successors) > 20:
+                        st.text(f"... +{len(successors) - 20} more")
+    else:
+        st.info("👈 Select a node from the dropdown to explore its neighborhood")
 
 else:
-    st.info("👈 Upload a pickle file to get started")
-    st.markdown("""
-    ### Expected Format:
-    - NetworkX Graph/DiGraph object, or
-    - pandas DataFrame with edge list (source, target columns)
-    
-    ### Install:
-    ```bash
-    pip install streamlit-agraph
-    ```
-    """)
+    st.info("👈 Upload a pickle file containing a NetworkX graph or edge list DataFrame")
