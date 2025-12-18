@@ -7,7 +7,7 @@ from pathlib import Path
 from streamlit_agraph import agraph, Node, Edge, Config
 
 # Page config
-st.set_page_config(page_title="Network Explorer", layout="wide")
+st.set_page_config(page_title="Explorer", layout="wide")
 
 # Persistent storage setup
 DATA_DIR = Path("/app/data")
@@ -106,7 +106,7 @@ def extract_neighborhood(G, product, hops_in=2, hops_out=2, max_products=20):
     return visited, edges
 
 # Title
-st.title('Network Explorer')
+st.title('Explorer - Inferred Value Chains')
 
 # Load data
 data = None
